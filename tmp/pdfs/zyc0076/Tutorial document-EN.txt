@@ -1,0 +1,261 @@
+                                             1 / 19
+
+
+
+
+ESP32 CAM McKnum Wheel ROBOT V1.0
+
+                                    V2.02.505.08
+                                                                                                                          1 / 19
+
+
+
+
+                                            Tutorial Introduction
+This tutorial includes the following files to help you learn more about the car kit and programming knowledge:
+
+
+
+
+"1_Get_start": This folder contains the robot assembly guide and necessary software environment files. In order to
+
+complete the assembly accurately and quickly, please read and follow the manual in detail. At the same time, the premise
+
+of realizing the program function is to correctly create the software environment. Please check the PDF files in this folder
+
+first .
+
+"2_Arduino_Code": This folder is used to store Arduino code files. Each code file is uploaded and used independently.
+
+“3_References”: This folder stores some reference materials;
+
+After completing the assembly of the car and creating the programming environment, follow this tutorial step by step to
+
+complete the burning of the smart car program and realize different functions!
+                                                                                                                                                                                  2 / 19
+
+
+
+
+                                                                  Table of contents
+1. Upload UNO code ...............................................................................................................................................................3
+
+       1.1 Description ............................................................................................................................................................... 3
+
+       1.2 Upload code ............................................................................................................................................................. 3
+
+2.ESP32 CAM ..........................................................................................................................................................................7
+
+       2.1 Description ............................................................................................................................................................... 7
+
+       2.2 Upload code ............................................................................................................................................................. 7
+
+       2.3 Check IP address ..................................................................................................................................................... 12
+
+3. APP remote control car .....................................................................................................................................................14
+
+       3.1 Android devices ...................................................................................................................................................... 14
+
+       3.2 iOS devices ..............................................................................................................................................................14
+
+       3.3. APP and ESP32 communication ............................................................................................................................. 15
+                                                                                                3 / 19
+
+
+
+
+1. Upload UNO code
+
+1.1 Description
+
+This section mainly introduces the use of TSCINBUNY control board and how to upload UNO code.
+
+1.2 Upload code
+
+Open the code file (path: 2_Arduino_Code\6.2_Arduino_UNO\6.2_Arduino_UNO.ino)
+
+
+
+
+unplug the four wires VCC/GND/RX/TX before uploading the program .
+                                                                 4 / 19
+
+
+
+
+Connect the Arduino board to your computer using a USB cable .
+                                                                                                 5 / 19
+
+
+
+
+Select Uno for board type and COM5 for serial port
+
+
+
+
+Note: In reality everyone 's serial port display will be different, although COM 5 is selected here ,
+
+it may be COM3 or COM4 on your computer.
+
+Click the "Upload" button and the program starts uploading.
+
+
+
+
+After the upload is successful, the message “Done uploading” will be displayed.
+6 / 19
+                                                                                                                     7 / 19
+
+
+
+
+2.ESP32 CAM
+
+2.1 Description
+
+This section mainly introduces the use of ESP32 CAM, learns how to upload code and realize the display of the captured
+
+image in real time on the browser after ESP32 CAM is connected to WiFi.
+
+2.2 Upload code
+
+Open the code file (path: 2_Arduino_Code\6.1_ESP32_Car\6.1_ESP32_Car.ino)
+
+
+
+
+network credentials account and password variables in the code to your own WiFi name and password !
+                                                                                                                     8 / 19
+
+
+
+
+ssid = " Your wifi name " ;
+
+password = " WIFI Password " ;
+
+At the same time, you should check that the WiFi you are connecting to is 2.4G instead of 5G band, otherwise the function
+
+cannot be realized!
+
+unplug the four wires VCC/GND/RX/TX before uploading the program .
+                                                                9 / 19
+
+
+
+
+Connect the ESP32 CAM board to your computer with a USB cable
+                                                                                                        10 / 19
+
+
+
+
+Select the board type as ESP32 and the serial port number as COM5
+
+
+
+
+Note: Select ESP32 Wrover as the board type and COM5 as the serial port . In fact, the serial port displayed
+
+by each person is different. Although COM 5 is selected here , it may be COM3 or COM4 on your computer.
+                                                                                  11 / 19
+
+
+
+
+Click the "Upload" button and the program starts uploading.
+
+
+
+
+After the upload is successful, the message “Done uploading” will be displayed.
+                                                                                                                     12 / 19
+
+
+
+
+2.3 Check IP address
+
+Open the serial monitor and set the baud rate to 115200 in the lower right corner
+
+
+
+
+Press the reset button on the ESP32 CAM to reload the program.(Or disconnect the USB and plug it back in to reset)
+                                                                                                                        13 / 19
+
+
+
+
+When the program reloads and successfully connects to WiFi, the IP address will be displayed: http://xxx.xxx.xxx.xxx,
+
+please write it down
+                                                                                                                  14 / 19
+
+
+
+
+3. APP remote control car
+
+3.1 Android devices
+
+Open the directory folder 4_APP and install "TSCINBUNY.apk" on your phone. When you see this tutorial, there may be a
+
+newer version of the software. When prompted to upgrade, please allow the upgrade and keep the phone connected to
+
+the network.
+
+
+
+
+3.2 iOS devices
+
+Open the App Store, search for and install TSCINBUNY
+                                                                                                                           15 / 19
+
+
+
+
+3.3. APP and ESP32 communication
+
+Next , we will take an Android phone as an example to demonstrate how to control a smart car through this application :
+
+turn on the phone's WIFI switch and connect to the corresponding WiFi in the code
+
+
+
+
+Then open the newly installed TSCINBUNY remote control APP, select the purchased product SKU> enter the main
+
+interface> fill in the IP address printed by the Arduino IDE serial port monitor into the input box and click OK to control.
+
+(The IP address will change after changing the network, and the IP obtained after uploading the code will prevail)
+16 / 19
+                                                                                                                      17 / 19
+
+
+
+
+Tips: If the Android phone cannot be controlled in the APP, please switch to the browser and enter the same IP to control
+                                                                                   18 / 19
+
+
+
+
+the car.
+
+When you can't see the picture:
+
+1. Please check whether the WiFi name and password have been changed correctly;
+
+2. The WiFi modified in the code is 2.4G frequency band, and the signal is good;
+
+3. Reset ESP32 CAM to ensure stable power supply and sufficient battery power;
+
+4. Check whether the network is unobstructed, stable and free of interference;
+
+
+
+For more tutorial content, please see folder 3_Reference
+

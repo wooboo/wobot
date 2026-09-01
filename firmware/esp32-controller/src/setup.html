@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Wobot · konfiguracja Wi‑Fi</title>
+  <style>
+    :root{--bg:oklch(1 0 0);--surface:oklch(.96 .008 110);--ink:oklch(.20 .015 110);--muted:oklch(.46 .018 110);--primary:oklch(.52 .105 110);--accent:oklch(.30 .10 245);--danger:oklch(.48 .17 28);--line:oklch(.87 .012 110);color-scheme:light;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--ink)}
+    *{box-sizing:border-box}body{margin:0;padding:40px 24px}main{max-width:680px;margin:auto}h1{font-size:1.75rem;letter-spacing:-.025em;margin:0 0 8px;text-wrap:balance}p{line-height:1.55;max-width:70ch}.lede{color:var(--muted);margin:0 0 32px}.status{display:flex;align-items:center;gap:10px;padding:14px 0;border-block:1px solid var(--line);margin-bottom:32px}.dot{width:10px;height:10px;border-radius:50%;background:var(--accent)}.status strong{font-size:.95rem}.status span:last-child{color:var(--muted);font-size:.9rem}.field{margin:24px 0}label{display:block;font-weight:650;margin-bottom:8px}.hint{font-size:.9rem;color:var(--muted);margin:8px 0 0}input{width:100%;min-height:46px;padding:10px 12px;background:var(--surface);border:1px solid var(--line);border-radius:10px;color:var(--ink);font:inherit}button{min-height:46px;border:0;border-radius:10px;padding:0 18px;font:inherit;font-weight:700;color:white;background:var(--primary);cursor:pointer}button:hover{filter:brightness(.93)}button:focus-visible,input:focus-visible{outline:3px solid var(--accent);outline-offset:3px}button:disabled{cursor:not-allowed;opacity:.55}.check{display:flex;align-items:center;gap:10px;margin-top:10px;font-weight:500}.check input{width:20px;min-height:20px}#message{min-height:1.6em;margin-top:16px;font-weight:620}.notice{margin-top:32px;padding:16px;background:var(--surface);border-radius:10px}.notice strong{display:block;margin-bottom:4px}.notice p{margin:0;color:var(--muted);font-size:.92rem}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}@media(max-width:520px){body{padding:24px 16px}button{width:100%}}@media(prefers-reduced-motion:no-preference){button{transition:filter 160ms ease-out,opacity 160ms ease-out}}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Połącz Wobota z Wi‑Fi</h1>
+    <p class="lede">Wybierz domową sieć 2,4 GHz. Dane zostaną zapisane w pamięci robota i użyte po restarcie.</p>
+    <div class="status" aria-label="Stan konfiguracji"><span class="dot" aria-hidden="true"></span><strong>Tryb konfiguracji</strong><span>Wobot-Setup · 192.168.71.1</span></div>
+    {{CONNECTION_NOTICE}}
+    <form id="wifi-form">
+      <div class="field">
+        <label for="ssid">Nazwa sieci</label>
+        <input id="ssid" name="ssid" list="networks" maxlength="32" autocomplete="off" required>
+        <datalist id="networks">{{NETWORK_OPTIONS}}</datalist>
+        <p class="hint">Możesz też wpisać nazwę ukrytej sieci ręcznie.</p>
+      </div>
+      <div class="field">
+        <label for="password">Hasło</label>
+        <input id="password" name="password" type="password" maxlength="63" autocomplete="new-password">
+        <label class="check"><input id="show-password" type="checkbox">Pokaż hasło</label>
+      </div>
+      <button id="submit" type="submit">Zapisz i połącz z siecią</button>
+      <p id="message" role="status" aria-live="polite"></p>
+    </form>
+    <div class="notice"><strong>Po zapisaniu punkt Wobot-Setup zniknie.</strong><p>Połącz telefon lub komputer z domowym Wi‑Fi i otwórz <code>http://wobot.local</code>.</p></div>
+  </main>
+  <script>
+    const form=document.querySelector('#wifi-form'),ssid=document.querySelector('#ssid'),password=document.querySelector('#password'),button=document.querySelector('#submit'),message=document.querySelector('#message');
+    document.querySelector('#show-password').addEventListener('change',event=>password.type=event.currentTarget.checked?'text':'password');
+    form.addEventListener('submit',event=>{
+      event.preventDefault();if(!ssid.value||new TextEncoder().encode(ssid.value).length>32){message.textContent='Nazwa sieci jest nieprawidłowa.';return}
+      button.disabled=true;ssid.disabled=true;password.disabled=true;message.textContent='Zapisywanie konfiguracji…';
+      const body=new URLSearchParams({ssid:ssid.value,password:password.value}).toString(),xhr=new XMLHttpRequest();xhr.open('POST','/api/wifi/configure');xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded');
+      xhr.onload=()=>{if(xhr.status===200){message.textContent='Zapisano. Wobot uruchamia się ponownie i łączy z domowym Wi‑Fi…'}else{message.textContent='Konfiguracja została odrzucona. Sprawdź dane.';button.disabled=false;ssid.disabled=false;password.disabled=false}};
+      xhr.onerror=()=>{message.textContent='Połączenie z Wobot-Setup zostało przerwane.';button.disabled=false;ssid.disabled=false;password.disabled=false};xhr.send(body);
+    });
+  </script>
+</body>
+</html>
