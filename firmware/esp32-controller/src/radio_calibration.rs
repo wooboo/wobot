@@ -10,12 +10,19 @@ const STORAGE_KEY: &str = "radio_cal";
 pub struct RadioCalibration {
     pub configured: bool,
     pub ranges: [[u16; 3]; CALIBRATION_CHANNELS],
-    /// Throttle, steering, strafe, direction, servo, ARM; zero-based indices.
-    pub mapping: [u8; 6],
-    /// Bits 0..=5 invert throttle, steering, strafe, direction, servo, and ARM.
-    pub invert_mask: u8,
-    /// Deadband in per-mille of calibrated travel.
-    pub deadband: u16,
+    /// Pedal throttle, steering, strafe, and direction; zero-based indices.
+    pub pedal_mapping: [u8; 4],
+    /// Centered forward/reverse, steering, and strafe axes; zero-based indices.
+    pub right_stick_mapping: [u8; 3],
+    /// Servo, ARM, and control-profile selector; zero-based indices.
+    pub shared_mapping: [u8; 3],
+    /// Bits invert the functions in the corresponding mapping arrays.
+    pub pedal_invert_mask: u8,
+    pub right_stick_invert_mask: u8,
+    pub shared_invert_mask: u8,
+    /// Dead zones in per-mille of calibrated travel.
+    pub stick_deadband: u16,
+    pub switch_deadband: u16,
 }
 
 impl Default for RadioCalibration {
@@ -23,9 +30,14 @@ impl Default for RadioCalibration {
         Self {
             configured: false,
             ranges: [[0, 16_384, 32_767]; CALIBRATION_CHANNELS],
-            mapping: [2, 0, 3, 5, 6, 4],
-            invert_mask: 0,
-            deadband: 35,
+            pedal_mapping: [2, 0, 3, 5],
+            right_stick_mapping: [1, 0, 3],
+            shared_mapping: [6, 4, 7],
+            pedal_invert_mask: 0,
+            right_stick_invert_mask: 0,
+            shared_invert_mask: 0,
+            stick_deadband: 35,
+            switch_deadband: 250,
         }
     }
 }
@@ -33,130 +45,270 @@ impl Default for RadioCalibration {
 impl RadioCalibration {
     pub fn from_form(body: &[u8]) -> anyhow::Result<Self> {
         let form = std::str::from_utf8(body)?;
-        let ranges = field(form, "ranges").ok_or_else(|| anyhow::anyhow!("missing ranges"))?;
-        let mut parsed_ranges = [[0_u16; 3]; CALIBRATION_CHANNELS];
-        let range_items: Vec<&str> = ranges.split(';').collect();
-        if range_items.len() != CALIBRATION_CHANNELS {
-            anyhow::bail!("expected {CALIBRATION_CHANNELS} channel ranges");
-        }
-        for (index, item) in range_items.into_iter().enumerate() {
-            let values: Vec<&str> = item.split(',').collect();
-            if values.len() != 3 {
-                anyhow::bail!("invalid range for channel {}", index + 1);
-            }
-            for (part, value) in values.into_iter().enumerate() {
-                parsed_ranges[index][part] = value.parse()?;
-            }
-            let [minimum, center, maximum] = parsed_ranges[index];
-            if maximum > 0x7fff || minimum > center || center > maximum {
-                anyhow::bail!("invalid values for channel {}", index + 1);
-            }
-        }
-
-        let mapping = [
-            parse_field::<u8>(form, "throttle")?,
-            parse_field::<u8>(form, "steering")?,
-            parse_field::<u8>(form, "strafe")?,
-            parse_field::<u8>(form, "direction")?,
+        let ranges = parse_ranges(form)?;
+        let pedal_mapping = [
+            parse_field::<u8>(form, "pedal_throttle")?,
+            parse_field::<u8>(form, "pedal_steering")?,
+            parse_field::<u8>(form, "pedal_strafe")?,
+            parse_field::<u8>(form, "pedal_direction")?,
+        ];
+        let right_stick_mapping = [
+            parse_field::<u8>(form, "stick_throttle")?,
+            parse_field::<u8>(form, "stick_steering")?,
+            parse_field::<u8>(form, "stick_strafe")?,
+        ];
+        let shared_mapping = [
             parse_field::<u8>(form, "servo")?,
             parse_field::<u8>(form, "arm")?,
+            parse_field::<u8>(form, "mode")?,
         ];
-        if mapping
-            .iter()
-            .any(|channel| *channel as usize >= CALIBRATION_CHANNELS)
-        {
-            anyhow::bail!("channel mapping is out of range");
-        }
-        for left in 0..mapping.len() {
-            for right in left + 1..mapping.len() {
-                if mapping[left] == mapping[right] {
-                    anyhow::bail!("each function must use a different channel");
-                }
-            }
-        }
 
-        let invert_mask = parse_field::<u8>(form, "invert")?;
-        if invert_mask & !0b11_1111 != 0 {
+        validate_channel_indices(&pedal_mapping)?;
+        validate_channel_indices(&right_stick_mapping)?;
+        validate_channel_indices(&shared_mapping)?;
+        ensure_unique(&[
+            pedal_mapping[0],
+            pedal_mapping[1],
+            pedal_mapping[2],
+            pedal_mapping[3],
+            shared_mapping[0],
+            shared_mapping[1],
+            shared_mapping[2],
+        ])?;
+        ensure_unique(&[
+            right_stick_mapping[0],
+            right_stick_mapping[1],
+            right_stick_mapping[2],
+            shared_mapping[0],
+            shared_mapping[1],
+            shared_mapping[2],
+        ])?;
+
+        let pedal_invert_mask = parse_field::<u8>(form, "pedal_invert")?;
+        let right_stick_invert_mask = parse_field::<u8>(form, "stick_invert")?;
+        let shared_invert_mask = parse_field::<u8>(form, "shared_invert")?;
+        if pedal_invert_mask & !0b1111 != 0
+            || right_stick_invert_mask & !0b111 != 0
+            || shared_invert_mask & !0b111 != 0
+        {
             anyhow::bail!("invalid inversion mask");
         }
-        let deadband = parse_field::<u16>(form, "deadband")?;
-        if deadband > 300 {
-            anyhow::bail!("deadband is too large");
+
+        let stick_deadband = parse_field::<u16>(form, "stick_deadband")?;
+        if stick_deadband > 300 {
+            anyhow::bail!("stick deadband is too large");
+        }
+        let switch_deadband = parse_field::<u16>(form, "switch_deadband")?;
+        if switch_deadband > 450 {
+            anyhow::bail!("switch deadband is too large");
         }
 
-        let function_names = ["gaz", "skręt", "jazda bokiem", "kierunek", "serwo", "ARM"];
-        for (function, &channel) in mapping.iter().enumerate() {
-            let [minimum, _, maximum] = parsed_ranges[channel as usize];
+        for &(channel, name) in &[
+            (pedal_mapping[0], "gaz trybu pedału"),
+            (pedal_mapping[1], "skręt trybu pedału"),
+            (pedal_mapping[2], "jazda bokiem"),
+            (pedal_mapping[3], "kierunek"),
+            (right_stick_mapping[0], "jazda przód/tył prawego drążka"),
+            (right_stick_mapping[1], "skręt prawego drążka"),
+            (
+                right_stick_mapping[2],
+                "jazda bokiem w trybie prawego drążka",
+            ),
+            (shared_mapping[0], "serwo"),
+            (shared_mapping[1], "ARM"),
+            (shared_mapping[2], "wybór trybu"),
+        ] {
+            let [minimum, _, maximum] = ranges[channel as usize];
             if maximum.saturating_sub(minimum) < 500 {
                 anyhow::bail!(
-                    "CH{} ({}) ma zbyt mały zarejestrowany zakres",
-                    channel + 1,
-                    function_names[function]
+                    "CH{} ({name}) ma zbyt mały zarejestrowany zakres",
+                    channel + 1
                 );
             }
         }
 
-        // Only centered stick axes need travel around the captured resting
-        // value. Direction and ARM derive their safe middle zones solely from
-        // measured endpoints; their resting positions may be at an extreme.
-        for &(axis, name) in &[(mapping[1], "skręt"), (mapping[2], "jazda bokiem")] {
-            let [minimum, center, maximum] = parsed_ranges[axis as usize];
+        for &(channel, name) in &[
+            (pedal_mapping[1], "skręt trybu pedału"),
+            (pedal_mapping[2], "jazda bokiem"),
+            (right_stick_mapping[0], "jazda przód/tył prawego drążka"),
+            (right_stick_mapping[1], "skręt prawego drążka"),
+            (
+                right_stick_mapping[2],
+                "jazda bokiem w trybie prawego drążka",
+            ),
+        ] {
+            let [minimum, center, maximum] = ranges[channel as usize];
             if center.saturating_sub(minimum) < 250 || maximum.saturating_sub(center) < 250 {
                 anyhow::bail!(
                     "CH{} ({name}) nie ma zakresu po obu stronach pozycji środkowej",
-                    axis + 1
+                    channel + 1
                 );
             }
         }
 
         Ok(Self {
             configured: true,
-            ranges: parsed_ranges,
-            mapping,
-            invert_mask,
-            deadband,
+            ranges,
+            pedal_mapping,
+            right_stick_mapping,
+            shared_mapping,
+            pedal_invert_mask,
+            right_stick_invert_mask,
+            shared_invert_mask,
+            stick_deadband,
+            switch_deadband,
         })
     }
 
     pub fn encode(&self) -> String {
-        let mut encoded = String::with_capacity(192);
+        let mut ranges = String::with_capacity(192);
         for (index, [minimum, center, maximum]) in self.ranges.iter().enumerate() {
             if index > 0 {
-                encoded.push(';');
+                ranges.push(';');
             }
-            write!(&mut encoded, "{minimum},{center},{maximum}").expect("write to String");
+            write!(&mut ranges, "{minimum},{center},{maximum}").expect("write to String");
         }
-        write!(
-            &mut encoded,
-            "|{},{},{},{},{},{}|{}|{}",
-            self.mapping[0],
-            self.mapping[1],
-            self.mapping[2],
-            self.mapping[3],
-            self.mapping[4],
-            self.mapping[5],
-            self.invert_mask,
-            self.deadband
+        format!(
+            "v4|{ranges}|{},{},{},{}|{},{},{}|{},{},{}|{},{},{}|{}|{}",
+            self.pedal_mapping[0],
+            self.pedal_mapping[1],
+            self.pedal_mapping[2],
+            self.pedal_mapping[3],
+            self.right_stick_mapping[0],
+            self.right_stick_mapping[1],
+            self.right_stick_mapping[2],
+            self.shared_mapping[0],
+            self.shared_mapping[1],
+            self.shared_mapping[2],
+            self.pedal_invert_mask,
+            self.right_stick_invert_mask,
+            self.shared_invert_mask,
+            self.stick_deadband,
+            self.switch_deadband
         )
-        .expect("write to String");
-        encoded
     }
 
     pub fn decode(encoded: &str) -> anyhow::Result<Self> {
+        if encoded.starts_with("v4|") {
+            return Self::decode_v4(encoded);
+        }
+        if encoded.starts_with("v3|") {
+            return Self::decode_v3(encoded);
+        }
+        if encoded.starts_with("v2|") {
+            return Self::decode_v2(encoded);
+        }
+        Self::decode_legacy(encoded)
+    }
+
+    fn decode_v4(encoded: &str) -> anyhow::Result<Self> {
+        let parts: Vec<&str> = encoded.split('|').collect();
+        if parts.len() != 8 || parts[0] != "v4" {
+            anyhow::bail!("invalid stored calibration");
+        }
+        Self::decode_profile_form(&parts, parts[6], parts[7], true)
+    }
+
+    fn decode_v3(encoded: &str) -> anyhow::Result<Self> {
+        let parts: Vec<&str> = encoded.split('|').collect();
+        if parts.len() != 8 || parts[0] != "v3" {
+            anyhow::bail!("invalid stored calibration");
+        }
+        Self::decode_profile_form(&parts, parts[6], parts[7], false)
+    }
+
+    fn decode_v2(encoded: &str) -> anyhow::Result<Self> {
+        let parts: Vec<&str> = encoded.split('|').collect();
+        if parts.len() != 7 || parts[0] != "v2" {
+            anyhow::bail!("invalid stored calibration");
+        }
+        Self::decode_profile_form(&parts, parts[6], "250", false)
+    }
+
+    fn decode_profile_form(
+        parts: &[&str],
+        stick_deadband: &str,
+        switch_deadband: &str,
+        has_strafe: bool,
+    ) -> anyhow::Result<Self> {
+        let pedal = split_exact::<4>(parts[2])?;
+        let shared = split_exact::<3>(parts[4])?;
+        let invert = split_exact::<3>(parts[5])?;
+        let stick: Vec<&str> = parts[3].split(',').collect();
+        let expected_stick_fields = if has_strafe { 3 } else { 2 };
+        if stick.len() != expected_stick_fields {
+            anyhow::bail!("invalid stored calibration");
+        }
+        let stick_strafe = if has_strafe {
+            stick[2].parse::<u8>()?
+        } else {
+            choose_migrated_strafe(pedal[2], &[stick[0], stick[1]], &shared)?
+        };
+        let stick_invert = if has_strafe {
+            invert[1].parse::<u8>()?
+        } else {
+            invert[1].parse::<u8>()? | (invert[0].parse::<u8>()? & 0b100)
+        };
+        let form = format!(
+            "ranges={}&pedal_throttle={}&pedal_steering={}&pedal_strafe={}&pedal_direction={}&stick_throttle={}&stick_steering={}&stick_strafe={stick_strafe}&servo={}&arm={}&mode={}&pedal_invert={}&stick_invert={}&shared_invert={}&stick_deadband={stick_deadband}&switch_deadband={switch_deadband}",
+            parts[1],
+            pedal[0],
+            pedal[1],
+            pedal[2],
+            pedal[3],
+            stick[0],
+            stick[1],
+            shared[0],
+            shared[1],
+            shared[2],
+            invert[0],
+            stick_invert,
+            invert[2]
+        );
+        Self::from_form(form.as_bytes())
+    }
+
+    fn decode_legacy(encoded: &str) -> anyhow::Result<Self> {
         let parts: Vec<&str> = encoded.split('|').collect();
         if parts.len() != 4 {
             anyhow::bail!("invalid stored calibration");
         }
+        let legacy = split_exact::<6>(parts[1])?;
+        let old_invert: u8 = parts[2].parse()?;
+        let mut used = [false; CALIBRATION_CHANNELS];
+        for value in legacy {
+            let channel: usize = value.parse()?;
+            if channel >= CALIBRATION_CHANNELS {
+                anyhow::bail!("invalid stored calibration");
+            }
+            used[channel] = true;
+        }
+        let stick_throttle = if !used[1] {
+            1
+        } else {
+            used.iter()
+                .position(|channel_used| !channel_used)
+                .ok_or_else(|| anyhow::anyhow!("no free channel for right stick"))?
+        };
+        used[stick_throttle] = true;
+        let mode = used
+            .iter()
+            .position(|channel_used| !channel_used)
+            .ok_or_else(|| anyhow::anyhow!("no free channel for mode selector"))?;
+        let pedal_invert = old_invert & 0b1111;
+        let stick_invert = old_invert & 0b110;
+        let shared_invert = ((old_invert >> 4) & 0b1) | ((old_invert >> 4) & 0b10);
         let form = format!(
-            "ranges={}&throttle={}&steering={}&strafe={}&direction={}&servo={}&arm={}&invert={}&deadband={}",
+            "ranges={}&pedal_throttle={}&pedal_steering={}&pedal_strafe={}&pedal_direction={}&stick_throttle={stick_throttle}&stick_steering={}&stick_strafe={}&servo={}&arm={}&mode={mode}&pedal_invert={pedal_invert}&stick_invert={stick_invert}&shared_invert={shared_invert}&stick_deadband={}&switch_deadband=250",
             parts[0],
-            parts[1].split(',').next().unwrap_or(""),
-            parts[1].split(',').nth(1).unwrap_or(""),
-            parts[1].split(',').nth(2).unwrap_or(""),
-            parts[1].split(',').nth(3).unwrap_or(""),
-            parts[1].split(',').nth(4).unwrap_or(""),
-            parts[1].split(',').nth(5).unwrap_or(""),
-            parts[2],
+            legacy[0],
+            legacy[1],
+            legacy[2],
+            legacy[3],
+            legacy[1],
+            legacy[2],
+            legacy[4],
+            legacy[5],
             parts[3]
         );
         Self::from_form(form.as_bytes())
@@ -170,23 +322,30 @@ impl RadioCalibration {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "{{\"ok\":true,\"configured\":{},\"ranges\":[{}],\"mapping\":{{\"throttle\":{},\"steering\":{},\"strafe\":{},\"direction\":{},\"servo\":{},\"arm\":{}}},\"invert\":{},\"deadband\":{}}}",
+            "{{\"ok\":true,\"configured\":{},\"ranges\":[{}],\"mapping\":{{\"pedal\":{{\"throttle\":{},\"steering\":{},\"strafe\":{},\"direction\":{}}},\"right_stick\":{{\"throttle\":{},\"steering\":{},\"strafe\":{}}},\"shared\":{{\"servo\":{},\"arm\":{},\"mode\":{}}}}},\"invert\":{{\"pedal\":{},\"right_stick\":{},\"shared\":{}}},\"deadband\":{},\"switch_deadband\":{}}}",
             self.configured,
             ranges,
-            self.mapping[0],
-            self.mapping[1],
-            self.mapping[2],
-            self.mapping[3],
-            self.mapping[4],
-            self.mapping[5],
-            self.invert_mask,
-            self.deadband
+            self.pedal_mapping[0],
+            self.pedal_mapping[1],
+            self.pedal_mapping[2],
+            self.pedal_mapping[3],
+            self.right_stick_mapping[0],
+            self.right_stick_mapping[1],
+            self.right_stick_mapping[2],
+            self.shared_mapping[0],
+            self.shared_mapping[1],
+            self.shared_mapping[2],
+            self.pedal_invert_mask,
+            self.right_stick_invert_mask,
+            self.shared_invert_mask,
+            self.stick_deadband,
+            self.switch_deadband
         )
     }
 }
 
 pub fn load(store: &EspDefaultNvs) -> anyhow::Result<RadioCalibration> {
-    let mut buffer = [0_u8; 512];
+    let mut buffer = [0_u8; 768];
     let Some(encoded) = store.get_str(STORAGE_KEY, &mut buffer)? else {
         return Ok(RadioCalibration::default());
     };
@@ -202,6 +361,78 @@ pub fn load(store: &EspDefaultNvs) -> anyhow::Result<RadioCalibration> {
 pub fn save(store: &EspDefaultNvs, calibration: &RadioCalibration) -> anyhow::Result<()> {
     store.set_str(STORAGE_KEY, &calibration.encode())?;
     Ok(())
+}
+
+fn parse_ranges(form: &str) -> anyhow::Result<[[u16; 3]; CALIBRATION_CHANNELS]> {
+    let encoded = field(form, "ranges").ok_or_else(|| anyhow::anyhow!("missing ranges"))?;
+    let items: Vec<&str> = encoded.split(';').collect();
+    if items.len() != CALIBRATION_CHANNELS {
+        anyhow::bail!("expected {CALIBRATION_CHANNELS} channel ranges");
+    }
+    let mut ranges = [[0_u16; 3]; CALIBRATION_CHANNELS];
+    for (index, item) in items.into_iter().enumerate() {
+        let values = split_exact::<3>(item)?;
+        for (part, value) in values.into_iter().enumerate() {
+            ranges[index][part] = value.parse()?;
+        }
+        let [minimum, center, maximum] = ranges[index];
+        if maximum > 0x7fff || minimum > center || center > maximum {
+            anyhow::bail!("invalid values for channel {}", index + 1);
+        }
+    }
+    Ok(ranges)
+}
+
+fn choose_migrated_strafe(
+    preferred: &str,
+    stick_channels: &[&str],
+    shared_channels: &[&str; 3],
+) -> anyhow::Result<u8> {
+    let mut used = [false; CALIBRATION_CHANNELS];
+    for value in stick_channels.iter().chain(shared_channels.iter()) {
+        let channel: usize = value.parse()?;
+        if channel >= CALIBRATION_CHANNELS {
+            anyhow::bail!("invalid stored calibration");
+        }
+        used[channel] = true;
+    }
+    let preferred: usize = preferred.parse()?;
+    if preferred < CALIBRATION_CHANNELS && !used[preferred] {
+        return Ok(preferred as u8);
+    }
+    used.iter()
+        .position(|channel_used| !channel_used)
+        .map(|channel| channel as u8)
+        .ok_or_else(|| anyhow::anyhow!("no free channel for strafe"))
+}
+
+fn validate_channel_indices(channels: &[u8]) -> anyhow::Result<()> {
+    if channels
+        .iter()
+        .any(|channel| *channel as usize >= CALIBRATION_CHANNELS)
+    {
+        anyhow::bail!("channel mapping is out of range");
+    }
+    Ok(())
+}
+
+fn ensure_unique(channels: &[u8]) -> anyhow::Result<()> {
+    for left in 0..channels.len() {
+        for right in left + 1..channels.len() {
+            if channels[left] == channels[right] {
+                anyhow::bail!("each active function must use a different channel");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn split_exact<const N: usize>(value: &str) -> anyhow::Result<[&str; N]> {
+    value
+        .split(',')
+        .collect::<Vec<_>>()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid stored calibration"))
 }
 
 fn field<'a>(form: &'a str, wanted: &str) -> Option<&'a str> {

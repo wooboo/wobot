@@ -8,8 +8,8 @@ use std::{
 };
 
 use wobot_core::{
-    ChannelCalibration, DriveInput, DriveMode, DriveOutput, DriveStopReason, HatDriveController,
-    MotorCommand, WheelSpeeds, FLAG_ARMED,
+    ChannelCalibration, ControlProfile, DriveDirection, DriveInput, DriveMode, DriveOutput,
+    DriveStopReason, HatDriveController, MotorCommand, WheelSpeeds, FLAG_ARMED,
 };
 
 use crate::{arduino_ota::ArduinoOta, radio::RadioService, radio_calibration::RadioCalibration};
@@ -20,6 +20,7 @@ const MAX_STEP_PER_PERIOD: i16 = 40;
 #[derive(Debug, Clone)]
 pub struct MotorSnapshot {
     pub sequence: u8,
+    pub control_profile: Option<ControlProfile>,
     pub output: Option<DriveOutput>,
     pub sent: bool,
     pub error: Option<String>,
@@ -51,6 +52,7 @@ impl MotorService {
         let service = Self {
             state: Arc::new(Mutex::new(MotorSnapshot {
                 sequence: 0,
+                control_profile: None,
                 output: None,
                 sent: false,
                 error: None,
@@ -132,10 +134,14 @@ fn control_loop(
             controller.require_disarm();
         }
 
-        let input = calibration
+        let decoded = calibration
             .lock()
             .ok()
             .and_then(|calibration| decode_input(&radio.snapshot(), &calibration));
+        if let Some((_, profile)) = decoded {
+            controller.select_control_profile(profile);
+        }
+        let input = decoded.map(|(input, _)| input);
         let output = controller.update(input);
         let command = MotorCommand {
             sequence,
@@ -160,6 +166,7 @@ fn control_loop(
         if let Ok(mut state) = state.lock() {
             *state = MotorSnapshot {
                 sequence,
+                control_profile: decoded.map(|(_, profile)| profile),
                 output: Some(output),
                 sent,
                 error,
@@ -172,45 +179,111 @@ fn control_loop(
 fn decode_input(
     snapshot: &crate::radio::RadioSnapshot,
     calibration: &RadioCalibration,
-) -> Option<DriveInput> {
+) -> Option<(DriveInput, ControlProfile)> {
     if !snapshot.connected || !calibration.configured {
         return None;
     }
-    let highest_channel = calibration.mapping.iter().copied().max()? as usize;
+    let highest_channel = calibration
+        .pedal_mapping
+        .iter()
+        .chain(calibration.right_stick_mapping.iter())
+        .chain(calibration.shared_mapping.iter())
+        .copied()
+        .max()? as usize;
     if snapshot.channel_count <= highest_channel {
         return None;
     }
 
-    let channel = |function: usize| {
-        let index = calibration.mapping[function] as usize;
+    let channel = |index: u8, inverted: bool| {
+        let index = index as usize;
         let [minimum, neutral, maximum] = calibration.ranges[index];
         (
             ChannelCalibration {
                 minimum,
                 neutral,
                 maximum,
-                inverted: calibration.invert_mask & (1 << function) != 0,
+                inverted,
             },
             snapshot.channels[index],
         )
     };
 
-    let (throttle_calibration, throttle_raw) = channel(0);
-    let (steering_calibration, steering_raw) = channel(1);
-    let (strafe_calibration, strafe_raw) = channel(2);
-    let (direction_calibration, direction_raw) = channel(3);
-    let (arm_calibration, arm_raw) = channel(5);
-    Some(DriveInput {
-        throttle: throttle_calibration.unipolar(throttle_raw).ok()?,
-        steering: steering_calibration
-            .bipolar(steering_raw, calibration.deadband as i16)
-            .ok()?,
-        strafe: strafe_calibration
-            .bipolar(strafe_raw, calibration.deadband as i16)
-            .ok()?,
-        direction: direction_calibration.direction(direction_raw).ok()?,
-        arm: arm_calibration.arm(arm_raw).ok()?,
-    })
+    let (profile_calibration, profile_raw) = channel(
+        calibration.shared_mapping[2],
+        calibration.shared_invert_mask & (1 << 2) != 0,
+    );
+    let profile = profile_calibration
+        .control_profile_with_deadband(profile_raw, calibration.switch_deadband)
+        .ok()?;
+    let (arm_calibration, arm_raw) = channel(
+        calibration.shared_mapping[1],
+        calibration.shared_invert_mask & (1 << 1) != 0,
+    );
+    let arm = arm_calibration
+        .arm_with_deadband(arm_raw, calibration.switch_deadband)
+        .ok()?;
+
+    let input = match profile {
+        ControlProfile::Pedal => {
+            let (throttle_calibration, throttle_raw) = channel(
+                calibration.pedal_mapping[0],
+                calibration.pedal_invert_mask & (1 << 0) != 0,
+            );
+            let (steering_calibration, steering_raw) = channel(
+                calibration.pedal_mapping[1],
+                calibration.pedal_invert_mask & (1 << 1) != 0,
+            );
+            let (strafe_calibration, strafe_raw) = channel(
+                calibration.pedal_mapping[2],
+                calibration.pedal_invert_mask & (1 << 2) != 0,
+            );
+            let (direction_calibration, direction_raw) = channel(
+                calibration.pedal_mapping[3],
+                calibration.pedal_invert_mask & (1 << 3) != 0,
+            );
+            DriveInput {
+                throttle: throttle_calibration.unipolar(throttle_raw).ok()?,
+                steering: steering_calibration
+                    .bipolar(steering_raw, calibration.stick_deadband as i16)
+                    .ok()?,
+                strafe: strafe_calibration
+                    .bipolar(strafe_raw, calibration.stick_deadband as i16)
+                    .ok()?,
+                direction: direction_calibration
+                    .direction_with_deadband(direction_raw, calibration.switch_deadband)
+                    .ok()?,
+                arm,
+            }
+        }
+        ControlProfile::RightStick => {
+            let (throttle_calibration, throttle_raw) = channel(
+                calibration.right_stick_mapping[0],
+                calibration.right_stick_invert_mask & (1 << 0) != 0,
+            );
+            let (steering_calibration, steering_raw) = channel(
+                calibration.right_stick_mapping[1],
+                calibration.right_stick_invert_mask & (1 << 1) != 0,
+            );
+            let (strafe_calibration, strafe_raw) = channel(
+                calibration.right_stick_mapping[2],
+                calibration.right_stick_invert_mask & (1 << 2) != 0,
+            );
+            DriveInput {
+                throttle: throttle_calibration
+                    .bipolar(throttle_raw, calibration.stick_deadband as i16)
+                    .ok()?,
+                steering: steering_calibration
+                    .bipolar(steering_raw, calibration.stick_deadband as i16)
+                    .ok()?,
+                strafe: strafe_calibration
+                    .bipolar(strafe_raw, calibration.stick_deadband as i16)
+                    .ok()?,
+                direction: DriveDirection::Forward,
+                arm,
+            }
+        }
+    };
+    Some((input, profile))
 }
 
 pub fn status_json(snapshot: &MotorSnapshot) -> String {
@@ -237,8 +310,13 @@ pub fn status_json(snapshot: &MotorSnapshot) -> String {
         .as_deref()
         .map(|error| format!("\"{}\"", crate::escape_json(error)))
         .unwrap_or_else(|| "null".to_owned());
+    let control_profile = match snapshot.control_profile {
+        Some(ControlProfile::Pedal) => "\"pedal\"",
+        Some(ControlProfile::RightStick) => "\"right_stick\"",
+        None => "null",
+    };
     format!(
-        "{{\"ok\":true,\"ready\":true,\"armed\":{},\"mode\":\"{mode}\",\"stop_reason\":{reason},\"wheels\":[{front_left},{front_right},{rear_left},{rear_right}],\"sequence\":{},\"sent\":{},\"error\":{error}}}",
+        "{{\"ok\":true,\"ready\":true,\"armed\":{},\"control_profile\":{control_profile},\"mode\":\"{mode}\",\"stop_reason\":{reason},\"wheels\":[{front_left},{front_right},{rear_left},{rear_right}],\"sequence\":{},\"sent\":{},\"error\":{error}}}",
         output.armed, snapshot.sequence, snapshot.sent
     )
 }
