@@ -2,6 +2,12 @@
 
 Firmware and shared control logic for the TSCINBUNY ZYC0076 mecanum robot.
 
+Arduino Alvik has a separate [MicroPython Wi-Fi controller](firmware/alvik-controller/README.md).
+It uses the same Pocket ELRS Wi-Fi Joystick transport and Alvik's motor API.
+The firmware and hardware instructions below apply to the original ZYC0076.
+
+Ustalenia dotyczące sprzętu i transportu: [docs/pocket-setup.md](docs/pocket-setup.md).
+
 ## Intended data path
 
 ```text
