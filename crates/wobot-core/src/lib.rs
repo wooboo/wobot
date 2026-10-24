@@ -3,6 +3,7 @@
 pub const COMMAND_MIN: i16 = -1_000;
 pub const COMMAND_MAX: i16 = 1_000;
 pub const CAR_STEERING_AUTHORITY: i16 = 700;
+pub const DEFAULT_SWITCH_DEADBAND: u16 = 250;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElrsFrameError {
@@ -138,11 +139,20 @@ impl ChannelCalibration {
 
     /// Decodes a three-position direction switch independently of arming.
     pub fn direction(self, raw: u16) -> Result<DriveDirection, CalibrationError> {
+        self.direction_with_deadband(raw, DEFAULT_SWITCH_DEADBAND)
+    }
+
+    pub fn direction_with_deadband(
+        self,
+        raw: u16,
+        deadband: u16,
+    ) -> Result<DriveDirection, CalibrationError> {
         if self.minimum >= self.maximum {
             return Err(CalibrationError::InvalidRange);
         }
         let raw = raw.clamp(self.minimum, self.maximum);
-        let (low_threshold, high_threshold) = switch_thresholds(self.minimum, self.maximum);
+        let (low_threshold, high_threshold) =
+            switch_thresholds(self.minimum, self.maximum, deadband);
         let direction = if raw < low_threshold {
             DriveDirection::Reverse
         } else if raw > high_threshold {
@@ -162,11 +172,16 @@ impl ChannelCalibration {
     /// Only the configured extreme position arms. The middle position and the
     /// opposite extreme both disarm, so a single ambiguous value cannot arm.
     pub fn arm(self, raw: u16) -> Result<ArmState, CalibrationError> {
+        self.arm_with_deadband(raw, DEFAULT_SWITCH_DEADBAND)
+    }
+
+    pub fn arm_with_deadband(self, raw: u16, deadband: u16) -> Result<ArmState, CalibrationError> {
         if self.minimum >= self.maximum {
             return Err(CalibrationError::InvalidRange);
         }
         let raw = raw.clamp(self.minimum, self.maximum);
-        let (low_threshold, high_threshold) = switch_thresholds(self.minimum, self.maximum);
+        let (low_threshold, high_threshold) =
+            switch_thresholds(self.minimum, self.maximum, deadband);
         let armed = if self.inverted {
             raw < low_threshold
         } else {
@@ -178,12 +193,47 @@ impl ChannelCalibration {
             ArmState::Disarmed
         })
     }
+
+    /// Selects the alternate control profile only at one switch extreme.
+    ///
+    /// A three-position switch therefore keeps its middle position on the
+    /// pedal profile. A two-position switch works as expected at its two
+    /// endpoints. This mirrors the fail-safe ARM decoder: an ambiguous value
+    /// can never unexpectedly select the alternate profile.
+    pub fn control_profile(self, raw: u16) -> Result<ControlProfile, CalibrationError> {
+        self.control_profile_with_deadband(raw, DEFAULT_SWITCH_DEADBAND)
+    }
+
+    pub fn control_profile_with_deadband(
+        self,
+        raw: u16,
+        deadband: u16,
+    ) -> Result<ControlProfile, CalibrationError> {
+        if self.minimum >= self.maximum {
+            return Err(CalibrationError::InvalidRange);
+        }
+        let raw = raw.clamp(self.minimum, self.maximum);
+        let (low_threshold, high_threshold) =
+            switch_thresholds(self.minimum, self.maximum, deadband);
+        let joystick = if self.inverted {
+            raw < low_threshold
+        } else {
+            raw > high_threshold
+        };
+        Ok(if joystick {
+            ControlProfile::RightStick
+        } else {
+            ControlProfile::Pedal
+        })
+    }
 }
 
-fn switch_thresholds(minimum: u16, maximum: u16) -> (u16, u16) {
+fn switch_thresholds(minimum: u16, maximum: u16, deadband: u16) -> (u16, u16) {
     let minimum = minimum as u32;
     let span = maximum as u32 - minimum;
-    ((minimum + span / 4) as u16, (minimum + span * 3 / 4) as u16)
+    let midpoint = minimum + span / 2;
+    let offset = span * deadband.min(499) as u32 / 1_000;
+    ((midpoint - offset) as u16, (midpoint + offset) as u16)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,6 +265,12 @@ impl DriveDirection {
 pub enum ArmState {
     Disarmed,
     Armed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlProfile {
+    Pedal,
+    RightStick,
 }
 
 impl ArmState {
@@ -382,6 +438,7 @@ impl DriveOutput {
 pub struct HatDriveController {
     saw_disarm: bool,
     armed: bool,
+    control_profile: Option<ControlProfile>,
     mode: DriveMode,
     left: SlewLimiter,
     right: SlewLimiter,
@@ -393,10 +450,20 @@ impl HatDriveController {
         Self {
             saw_disarm: false,
             armed: false,
+            control_profile: None,
             mode: DriveMode::Stopped,
             left: SlewLimiter::new(max_step),
             right: SlewLimiter::new(max_step),
             strafe: SlewLimiter::new(max_step),
+        }
+    }
+
+    /// Changes the radio control profile and invalidates the ARM latch.
+    /// Returning to motion always requires a fresh physical DISARM observation.
+    pub fn select_control_profile(&mut self, profile: ControlProfile) {
+        if self.control_profile != Some(profile) {
+            self.control_profile = Some(profile);
+            self.require_disarm();
         }
     }
 
@@ -708,6 +775,62 @@ mod tests {
     }
 
     #[test]
+    fn control_profile_switch_uses_only_one_extreme_for_right_stick() {
+        let channel = ChannelCalibration {
+            minimum: 1_000,
+            neutral: 1_500,
+            maximum: 2_000,
+            inverted: false,
+        };
+        assert_eq!(channel.control_profile(1_000), Ok(ControlProfile::Pedal));
+        assert_eq!(channel.control_profile(1_500), Ok(ControlProfile::Pedal));
+        assert_eq!(
+            channel.control_profile(2_000),
+            Ok(ControlProfile::RightStick)
+        );
+        assert_eq!(
+            ChannelCalibration {
+                inverted: true,
+                ..channel
+            }
+            .control_profile(1_000),
+            Ok(ControlProfile::RightStick)
+        );
+    }
+
+    #[test]
+    fn switch_deadband_controls_the_safe_middle_zone() {
+        let channel = ChannelCalibration {
+            minimum: 1_000,
+            neutral: 1_500,
+            maximum: 2_000,
+            inverted: false,
+        };
+
+        assert_eq!(
+            channel.direction_with_deadband(1_650, 250),
+            Ok(DriveDirection::Neutral)
+        );
+        assert_eq!(
+            channel.direction_with_deadband(1_650, 100),
+            Ok(DriveDirection::Forward)
+        );
+        assert_eq!(
+            channel.arm_with_deadband(1_650, 250),
+            Ok(ArmState::Disarmed)
+        );
+        assert_eq!(channel.arm_with_deadband(1_650, 100), Ok(ArmState::Armed));
+        assert_eq!(
+            channel.control_profile_with_deadband(1_650, 250),
+            Ok(ControlProfile::Pedal)
+        );
+        assert_eq!(
+            channel.control_profile_with_deadband(1_650, 100),
+            Ok(ControlProfile::RightStick)
+        );
+    }
+
+    #[test]
     fn full_elrs_range_keeps_switch_center_safe() {
         let channel = ChannelCalibration {
             minimum: 19,
@@ -834,6 +957,24 @@ mod tests {
 
         let safe_arm = drive_input(ArmState::Armed, DriveDirection::Forward, 0, 0);
         assert!(drive.update(Some(safe_arm)).armed);
+    }
+
+    #[test]
+    fn changing_control_profile_requires_a_fresh_disarm() {
+        let mut drive = HatDriveController::new(100);
+        drive.select_control_profile(ControlProfile::Pedal);
+        let disarmed = drive_input(ArmState::Disarmed, DriveDirection::Forward, 0, 0);
+        let armed = drive_input(ArmState::Armed, DriveDirection::Forward, 0, 0);
+        drive.update(Some(disarmed));
+        assert!(drive.update(Some(armed)).armed);
+
+        drive.select_control_profile(ControlProfile::RightStick);
+        assert_eq!(
+            drive.update(Some(armed)).stop_reason,
+            Some(DriveStopReason::AwaitingDisarm)
+        );
+        drive.update(Some(disarmed));
+        assert!(drive.update(Some(armed)).armed);
     }
 
     #[test]

@@ -172,13 +172,14 @@ fn main() -> anyhow::Result<()> {
     register_ota_handler(&mut server, motors.clone())?;
     register_arduino_ota_handlers(&mut server, arduino_ota, motors.clone())?;
     register_status_handler(&mut server)?;
-    register_motor_status_handler(&mut server, motors)?;
+    register_motor_status_handler(&mut server, motors.clone())?;
     register_wifi_handlers(&mut server, Arc::clone(&credentials_store))?;
     register_radio_handlers(
         &mut server,
         radio,
         Arc::clone(&credentials_store),
         radio_calibration,
+        motors,
     )?;
 
     let mut mdns = EspMdns::take()?;
@@ -219,6 +220,7 @@ fn register_radio_handlers(
     radio: RadioService,
     calibration_store: CredentialsStore,
     calibration_state: Arc<Mutex<RadioCalibration>>,
+    motors: MotorService,
 ) -> anyhow::Result<()> {
     let status_radio = radio.clone();
     server.fn_handler("/api/radio/status", Method::Get, move |request| {
@@ -331,6 +333,7 @@ fn register_radio_handlers(
                     .map_err(|_| anyhow::anyhow!("calibration store lock poisoned"))?;
                 radio_calibration::save(&store, &calibration)?;
             }
+            motors.require_disarm();
             *save_calibration
                 .lock()
                 .map_err(|_| anyhow::anyhow!("calibration state lock poisoned"))? =

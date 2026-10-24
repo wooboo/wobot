@@ -1,0 +1,27 @@
+{
+  "ssid": "",
+  "password": "",
+  "transmitter_ip": "",
+  "dry_run": true,
+  "calibration_confirmed": false,
+  "max_rpm": 20,
+  "timeout_ms": 250,
+  "deadband": 35,
+  "switch_deadband": 250,
+  "channels": {
+    "steering": 1,
+    "throttle": 2,
+    "pedal": 3,
+    "strafe": 4,
+    "arm": 5,
+    "direction": 6,
+    "profile": 8
+  },
+  "inverted": [],
+  "ranges": [
+    [0, 16384, 32767], [0, 16384, 32767], [0, 16384, 32767],
+    [0, 16384, 32767], [0, 16384, 32767], [0, 16384, 32767],
+    [0, 16384, 32767], [0, 16384, 32767], [0, 16384, 32767],
+    [0, 16384, 32767]
+  ]
+}
